@@ -1,19 +1,15 @@
 from multiprocessing import Process, Manager, Lock
-import time
 import sqlite3
 import zlib
 import re
 import numpy as np
-from image import RawImageReader  # Your own modules
-from sample import Sample  # Your own modules
-from imageProcessing import find_files_with_extension  # Your own modules
+from imageProcessing import find_files_with_extension
 
 
-class ParallelInserter:
-    def __init__(self, database_file_path: str, target):
+class DatabaseInserter:
+    def __init__(self, database_file_path: str):
         self.database_path = database_file_path
         self.queue_maxsize = 6
-        self.target_class = target
         self.progress_output_lock = Lock()
         self.manager = Manager()
         self.queue = self.manager.Queue(self.queue_maxsize)

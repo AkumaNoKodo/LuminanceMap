@@ -1,39 +1,32 @@
 import zlib
 import re
 import numpy as np
-from sample import Sample
-from image import RawImageReader
+
+from image import RawImage
 from imageProcessing import find_files_with_extension
 import sqlite3
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from multiprocessing import Queue
-import threading
+
 
 
 class DatabaseManager:
     def __init__(self, filename: str):
         sqlite3.register_adapter(np.ndarray, self._adapt_nparray)
         sqlite3.register_converter("NPARRAY", self._convert_nparray)
-
         self.database = sqlite3.connect(filename, detect_types=sqlite3.PARSE_DECLTYPES)
-        self.table_name = "raw_samples"
 
-        sample = Sample()
-        sample.create_new_table(self)
-
-    def __del__(self):
+    def __exit__(self):
         self.database.commit()
         self.database.close()
 
     def insert_sample(self, sample) -> None:
         sample.insert_to_database(self)
 
-    def insert_from_folder(self, folder: str, extension: str) -> None:
+    def insert_from_folder(self, folder: str, extension: str, table_name: str) -> None:
         files = find_files_with_extension(folder, extension)
-        # inserter = ParallelInserter(files, self)
-        # inserter.process_files()
 
-    def load_samples_from_ids(self, row_ids: list[int]) -> list[Sample]:
+
+
+    def load_samples_from_ids(self, row_ids: list[int]) -> list[RawImage]:
         cursor = self.database.cursor()
         if 0 in row_ids:
             sql_command = f"SELECT * FROM {self.table_name}"
@@ -75,10 +68,10 @@ class DatabaseManager:
             return b"0" + header + data_bytes  # "0" state without compression
 
     @staticmethod
-    def _convert_nparray(text) -> np.ndarray:
-        is_compressed = text[0] == ord('1')
-        length = int.from_bytes(text[1:5], 'big')
-        shape_dtype_str, data = text[5:5 + length].decode(), text[5 + length:]
+    def _convert_nparray(bytes_array: bytes) -> np.ndarray:
+        is_compressed = bytes_array[0] == ord('1')
+        length = int.from_bytes(bytes_array[1:5], 'big')
+        shape_dtype_str, data = bytes_array[5:5 + length].decode(), bytes_array[5 + length:]
         shape_str, dtype_str = re.search(r"(\(.*\))(\[.*])", shape_dtype_str).groups()
         shape = tuple(map(int, re.findall(r"\d+", shape_str)))
         dtype = np.dtype(eval(dtype_str))
