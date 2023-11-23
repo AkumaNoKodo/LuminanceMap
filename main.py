@@ -1,25 +1,19 @@
-from itertools import groupby
-from operator import itemgetter
 from pprint import pprint
-import pickle
-from image import RawImage, RawImageConvertor
-from imageProcessing import find_files_with_extension
+from calibration import complete_statistic_data_per_exposure_time, complete_statistic_data_per_f_number, \
+    complete_statistic_data_per_iso, get_statistic_data_per_exposure_time, group_samples_per_tags
+from image import TempRawImages
 
 if __name__ == "__main__":
-    folder = r"C:\Users\marku\Downloads\Kalibrace_NIKON_90D\Kalibrace_NIKON_90D_1"
-    raw_files = find_files_with_extension(folder, "nef")
-
-    # # raw_files = raw_files[2:3]
-    # x = [RawConvertor.apply_post_processing_rgb_algorythm(RawImage(x)) for x in raw_files]
-    # x = sorted(x, key=lambda y: (y["iso"], y["f_number"], y["exposure_time"]))
-    # grouped = {iso: {f_number: list(items_f)
-    #                  for f_number, items_f in groupby(items_iso, key=itemgetter('f_number'))}
-    #            for iso, items_iso in groupby(x, key=itemgetter('iso'))}
-    #
-    # with open('large_dict.pkl', 'wb') as f:
-    #     pickle.dump(grouped, f)
-    #
-    # with open('large_dict.pkl', 'rb') as f:
-    #     grouped = pickle.load(f)
-    #
-    # pprint(grouped)
+    extension = "nef"
+    folder = r"C:\Users\marku\Downloads\Kalibrace_NIKON_90D"
+    images = TempRawImages()
+    images.create_from_folder(folder, extension)
+    data = group_samples_per_tags(images.temp_files_list)
+    data = get_statistic_data_per_exposure_time(data)
+    # file = "all_image_statistic2023_11_23_01_28_20_996298.pkl"
+    # with open(file, "rb") as a_file:
+    #     data = pickle.load(a_file)
+    data = complete_statistic_data_per_exposure_time(data)
+    data = complete_statistic_data_per_f_number(data)
+    data = complete_statistic_data_per_iso(data)
+    pprint(data)

@@ -1,13 +1,16 @@
+import datetime
+import json
+import pickle
 import re
 from pprint import pprint
-from typing import Tuple, List
 import rawpy
 import exifread
 import os
 from abc import ABC
 import numpy as np
-from imageProcessing import timing_decorator
+from imageProcessing import find_files_with_extension
 import glob
+import shutil
 
 
 def safe_initialization(decorated_class):
@@ -26,10 +29,6 @@ class Data(ABC):
     def __init__(self, input_python_class, input_data_name):
         self.python_class: type = input_python_class
         self.data_name: str | None = input_data_name
-
-        python_to_database_type_dict = {"str": "TEXT", "float": "REAL", "ndarray": "NPARRAY"}
-        self.database_data_type: str | None = python_to_database_type_dict[self.python_class.__name__]
-
         self.class_and_precision: str | None = None
         self._data: str | float | np.ndarray | None = None
         self.expected_size: tuple | int | None = None
@@ -216,7 +215,6 @@ class Cfa(Data):
         self.data = raw_image.raw_image_visible.copy()
 
 
-@timing_decorator
 class RawImage:
     def __init__(self, file_path):
         if not os.path.splitext(file_path)[1].lower() in ['.nef', '.cr2']:
@@ -251,41 +249,55 @@ class RawImage:
             pprint(data_dict)
         return data_dict
 
-    def new_table_command(self, table_name) -> str:
-        columns_setting = [f"{value.data_name} {value.database_data_type}" for value in self.__dict__.values() if
-                           isinstance(value, Data)]
-        return (f"CREATE TABLE IF NOT EXISTS {table_name} ( id INTEGER PRIMARY KEY AUTOINCREMENT, " +
-                ", ".join(columns_setting) + ")")
-
-    def new_insert_command(self, table_name) -> Tuple[str, List]:
-        columns, values = map(list, zip(*self.__dict__.items()))
-        command = (f"INSERT INTO {table_name} ({', '.join(columns)}) "
-                   f"VALUES ({', '.join(['?' for _ in columns])})")
-        values = [value.data for value in values]
-        return command, values
-
 
 class RawImageConvertor:
-    def apply_post_processing_rgb_algorythm(self, raw_image: RawImage) -> dict:
+    @staticmethod
+    def apply_post_processing_rgb_algorythm(raw_image: RawImage) -> dict:
         image_data_dict = raw_image.get_data_like_dict()
 
         cfa = image_data_dict.pop("cfa", None)
         tone_curve = image_data_dict.pop("tone_curve", None)
-        cfa = self.apply_tone_curve(cfa, tone_curve)
-        del tone_curve
-
-        channels = self.cfa2channels(cfa)
-        del cfa
+        cfa = RawImageConvertor.apply_tone_curve(cfa, tone_curve)
+        channels = RawImageConvertor.cfa2channels(cfa)
 
         black_level = image_data_dict.pop("black_level", None)
         white_level = image_data_dict.pop("white_level", None)
-        channels = self.rescale_channels(channels, black_level, white_level)
+        channels = RawImageConvertor.rescale_channels(channels, black_level, white_level)
+        image_data_dict["channels"] = channels
 
         bayer_pattern = image_data_dict.pop("bayer_pattern", None)
-        rgb = self.channels2rgb(channels, bayer_pattern)
+        rgb = RawImageConvertor.channels2rgb(image_data_dict.pop("channels", None), bayer_pattern)
         image_data_dict["rgb"] = rgb
 
         return image_data_dict
+
+    @staticmethod
+    def cfa_analyze(image_data_dict: dict) -> dict:
+        cfa = image_data_dict.pop("cfa", None)
+        tone_curve = image_data_dict.pop("tone_curve", None)
+        cfa = RawImageConvertor.apply_tone_curve(cfa, tone_curve)
+        channels = RawImageConvertor.cfa2channels(cfa)
+
+        black_level = image_data_dict.pop("black_level", None)
+        white_level = image_data_dict.pop("white_level", None)
+        channels = RawImageConvertor.rescale_channels(channels, black_level, white_level)
+        reconstructed_cfa = RawImageConvertor.channels2cfa(channels, image_data_dict["bayer_pattern"])
+        image_data_dict["reconstructed_cfa"] = reconstructed_cfa
+        return image_data_dict
+
+    @staticmethod
+    def channels2cfa(channels, cfa_pattern: str) -> np.ndarray:
+        height, width, _ = channels.shape[0] * 2, channels.shape[1] * 2, channels.shape[2]
+        reconstructed_cfa = np.zeros((height, width), dtype=channels.dtype)
+
+        indexes = RawImageConvertor.get_patter_indexes(cfa_pattern)
+
+        reconstructed_cfa[::2, ::2] = np.squeeze(channels[:, :, indexes[0]])
+        reconstructed_cfa[::2, 1::2] = np.squeeze(channels[:, :, indexes[1][0]])
+        reconstructed_cfa[1::2, ::2] = np.squeeze(channels[:, :, indexes[1][1]])
+        reconstructed_cfa[1::2, 1::2] = np.squeeze(channels[:, :, indexes[2]])
+
+        return reconstructed_cfa
 
     @staticmethod
     def cfa2channels(cfa: np.ndarray) -> np.ndarray:
@@ -293,22 +305,24 @@ class RawImageConvertor:
 
     @staticmethod
     def rescale_channels(channels: np.ndarray, black_level: np.ndarray, white_level: np.ndarray) -> np.ndarray:
-        channels = (channels - black_level) / (white_level - black_level)
-        channels = np.where(channels < 0, 0, channels)
-        channels = np.where(channels > 1, 1, channels)
+        channels = (channels - black_level) / white_level
+        channels[(channels <= 0) | (channels >= 1)] = np.nan
         return channels
 
     @staticmethod
-    def channels2rgb(channels: np.ndarray, cfa_pattern: str) -> np.ndarray:
+    def get_patter_indexes(cfa_pattern: str) -> list[list[int] | int]:
         pattern = cfa_pattern.upper()
-        indices_of_r = np.array([match.start() for match in re.finditer('R', pattern)])
-        indices_of_g = np.array([match.start() for match in re.finditer('G', pattern)])
-        indices_of_b = np.array([match.start() for match in re.finditer('B', pattern)])
+        letters = ["R", "G", "B"]
+        return [[match.start() for match in re.finditer(letter, pattern)] for letter in letters]
+
+    @staticmethod
+    def channels2rgb(channels: np.ndarray, cfa_pattern: str) -> np.ndarray:
+        indexes = RawImageConvertor.get_patter_indexes(cfa_pattern)
 
         return np.stack((
-            channels[:, :, indices_of_r].squeeze(),
-            np.mean(channels[:, :, indices_of_g], axis=2).squeeze(),
-            channels[:, :, indices_of_b].squeeze()
+            channels[:, :, indexes[0]].squeeze(),
+            np.mean(channels[:, :, indexes[1]], axis=2).squeeze(),
+            channels[:, :, indexes[2]].squeeze()
         ), axis=2)
 
     @staticmethod
@@ -329,7 +343,60 @@ class RawImageConvertor:
         extension = extension.lower()
         directory_path = os.path.abspath(directory)
         search_path = os.path.join(directory_path, f"**/*.{extension}")
-        files = glob.glob(search_path, recursive=True)
-        return files
+        return glob.glob(search_path, recursive=True)
 
 
+class TempRawImages:
+    def __init__(self):
+        self.main_folder = "TEMP"
+        self.tem_json_file = os.path.join(self.main_folder, "temp_information.json")
+        self.temp_files_list = []
+        if not os.path.exists(self.main_folder):
+            os.makedirs(self.main_folder)
+        else:
+            if os.path.exists(self.tem_json_file):
+                with open(self.tem_json_file, 'r') as file:
+                    self.temp_files_list = json.load(file)
+
+    def create_from_folder(self, folder: str, extension: str, clean_option: bool = True):
+        sub_folders = \
+            [os.path.join(folder, item) for item in os.listdir(folder) if os.path.isdir(os.path.join(folder, item))]
+
+        if clean_option:
+            self.clean()
+
+        for sub_folder in sub_folders:
+            raw_files = find_files_with_extension(sub_folder, extension)
+            tag = os.path.basename(os.path.dirname(raw_files[0]))
+
+            self.temp_files_list.extend([self.get_image_data(file, self.main_folder, tag) for file in raw_files])
+        self.save_content()
+
+    @staticmethod
+    def get_image_data(file: str, main_folder: str, tag: str):
+        im = RawImage(file)
+        process_im = im.get_data_like_dict()
+        time_stamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
+        path = os.path.join(main_folder,
+                            f"temp_{time_stamp}.pkl")
+
+        information_dict = {"tag": tag,
+                            "src_file_name": path,
+                            "iso": process_im["iso"],
+                            "f_number": process_im["f_number"],
+                            "exposure_time": process_im['exposure_time']
+                            }
+
+        with open(information_dict["src_file_name"], 'wb') as f:
+            pickle.dump(process_im, f)
+
+        return information_dict
+
+    def save_content(self):
+        with open(self.tem_json_file, 'w') as file:
+            json.dump(self.temp_files_list, file, indent=4)
+
+    def clean(self):
+        if os.path.exists(self.main_folder):
+            shutil.rmtree(self.main_folder)
+        os.makedirs(self.main_folder)
