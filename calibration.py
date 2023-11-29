@@ -1,5 +1,5 @@
-import os
 import pickle
+import shutil
 from concurrent.futures import ProcessPoolExecutor
 from pprint import pprint
 import numpy as np
@@ -15,7 +15,7 @@ def calibration_statistic_data_from_sets_folder(folder: str) -> None:
     with open("exposure_time_stat.pkl", "wb") as a_file:
         pickle.dump(stat, a_file)
 
-    os.remove("TEMP")
+    shutil.rmtree("TEMP")
     pprint(stat)
 
 
@@ -25,7 +25,7 @@ def get_statistic_data_exposure_time(data: Image | list[Image]):
     data = get_statistic_data_per_exposure_time(data)
     stat["per_exposure_time"] = data.copy()
     data1 = complete_statistic_data_per_exposure_time(data)
-    stat["per_exposure_time_complete"] = data.copy()
+    stat["per_exposure_time_complete"] = data1.copy()
     data2 = complete_statistic_data_per_f_number(data1)
     stat["per_f_number"] = data2.copy()
     data3 = complete_statistic_data_per_iso(data2)
