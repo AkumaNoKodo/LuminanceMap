@@ -14,9 +14,3 @@ def timing_decorator(func):
     return wrapper
 
 
-def find_files_with_extension(directory: str, extension: str) -> list:
-    extension = extension.lower()
-    directory_path = os.path.abspath(directory)
-    search_path = os.path.join(directory_path, f"**/*.{extension}")
-    files = glob.glob(search_path, recursive=True)
-    return files

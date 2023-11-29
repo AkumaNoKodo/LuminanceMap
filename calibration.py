@@ -1,56 +1,46 @@
-import datetime
+import os
 import pickle
+from concurrent.futures import ProcessPoolExecutor
+from pprint import pprint
 import numpy as np
-from image import RawImageConvertor
-
-#
-#
-# def compute_statistics(a_data, b_data) -> dict:
-#     relation = np.abs(a_data / b_data)
-#     std_of_relation = np.nanstd(relation, axis=(0, 1))
-#     if np.any(std_of_relation > 0.15) or np.any(std_of_relation < 0.001) or np.any(np.isnan(std_of_relation)):
-#         return {}
-#
-#     nan_count = np.count_nonzero(~np.isnan(relation))
-#     good_percent_count = 100 * nan_count / relation.size
-#     if good_percent_count < 1:
-#         return {}
-#
-#     statistics = {
-#         "mean_of_relation": np.nanmean(relation, axis=(0, 1)),
-#         "median_of_relation": np.nanmedian(relation, axis=(0, 1)),
-#         "std_of_relation": std_of_relation,
-#         "max_of_relation": np.nanmax(relation, axis=(0, 1)),
-#         "min_of_relation": np.nanmin(relation, axis=(0, 1)),
-#         "var_of_relation": np.nanvar(relation, axis=(0, 1)),
-#         "good_pixel_percent": f"({nan_count} / {relation.size}) = {good_percent_count:.3f}"
-#     }
-#     return statistics
-
-#
-# def complete_statistic(calibration_sets):
-#     mean_of_relations = np.array([d['statistics']['mean_of_relation'] for d in calibration_sets])
-#     std_of_relations = np.array([d['statistics']['std_of_relation'] for d in calibration_sets])
-#
-#     mean_of_means = np.mean(mean_of_relations, axis=0)
-#     mean_of_stds = np.mean(std_of_relations, axis=0)
-#
-#     var_of_means = np.mean((mean_of_relations - mean_of_means) ** 2, axis=0) + mean_of_stds ** 2
-#
-#     std_total = np.sqrt(var_of_means)
-#
-#     with open('output.txt', 'a') as file:
-#         file.write("Mean for RGB channels: " + str(mean_of_means) + "\n")
-#         file.write("RGB std: " + str(std_total) + "\n")
+import psutil
+from image2 import Image, ImageLoader
 
 
-def group_samples_per_tags(data):
+def calibration_statistic_data_from_sets_folder(folder: str) -> None:
+    loader = ImageLoader(True)
+    all_images = loader.load_images_sets_from_folder(folder)
+    stat = get_statistic_data_exposure_time(all_images)
+
+    with open("exposure_time_stat.pkl", "wb") as a_file:
+        pickle.dump(stat, a_file)
+
+    os.remove("TEMP")
+    pprint(stat)
+
+
+def get_statistic_data_exposure_time(data: Image | list[Image]):
+    stat = {}
+    data = group_samples_per_tags(data)
+    data = get_statistic_data_per_exposure_time(data)
+    stat["per_exposure_time"] = data.copy()
+    data1 = complete_statistic_data_per_exposure_time(data)
+    stat["per_exposure_time_complete"] = data.copy()
+    data2 = complete_statistic_data_per_f_number(data1)
+    stat["per_f_number"] = data2.copy()
+    data3 = complete_statistic_data_per_iso(data2)
+    stat["per_iso"] = data3.copy()
+
+    return stat
+
+
+def group_samples_per_tags(data: Image | list[Image]):
     grouped = {}
     for record in data:
-        tag = record["tag"]
-        iso = record["iso"]
-        f_number = record["f_number"]
-        exposure_time = record["exposure_time"]
+        tag = record.tag
+        iso = record.iso
+        f_number = record.f_number
+        exposure_time = record.exposure_time
 
         if tag not in grouped:
             grouped[tag] = {}
@@ -88,61 +78,69 @@ def group_samples_per_iso(data):
     return grouped
 
 
-def prepare_data(source, key):
-    path = source[key]["src_file_name"]
-    with open(path, "rb") as a_file:
-        data = pickle.load(a_file)
-        data = RawImageConvertor.cfa_analyze(data)
-        rgb = data["reconstructed_cfa"]
-        rgb[(rgb < 0.15) | (rgb > 0.95)] = np.nan
-    return rgb
+def prepare_data(source, key) -> np.ndarray | None:
+    image = source[key]
+    data = image.rescale_cfa
+    data[(data < 0.15) | (data > 0.95)] = np.nan
+    return data
 
 
-def get_statistic_data_per_exposure_time(data: dict) -> list:
-    calibration_sets = []
-    exposure_times_combination = []
+def prepare_combination(data: dict):
+    combinations = []
     for tag, iso_dict in data.items():
         for iso, f_number_dict in iso_dict.items():
             for f_number, exposure_times_dict in f_number_dict.items():
                 sorted_keys = sorted(exposure_times_dict.keys(), key=lambda x: float(x))
                 for a, b in zip(sorted_keys[:-1], sorted_keys[1:]):
-                    exposure_times_combination.append([a, b])
-                    a_data = prepare_data(exposure_times_dict, a)
-                    b_data = prepare_data(exposure_times_dict, b)
+                    combinations.append([tag, iso, f_number, exposure_times_dict, a, b])
 
-                    relation = np.abs(a_data / b_data)
-                    std_of_relation = np.nanstd(relation, axis=(0, 1))
-                    if np.any(std_of_relation > 0.15) or np.any(std_of_relation < 0.001) or np.any(
-                            np.isnan(std_of_relation)):
-                        continue
+    return combinations
 
-                    not_nan_count = np.count_nonzero(~np.isnan(relation))
-                    good_percent_count = 100 * not_nan_count / relation.size
-                    if good_percent_count < 1:
-                        continue
 
-                    calibration_set = {
-                        "tag": tag,
-                        "iso": iso,
-                        "f_number": f_number,
-                        "A_exposure_time": a,
-                        "B_exposure_time": b,
-                        "mean_of_relation": np.nanmean(relation, axis=(0, 1)),
-                        "std_of_relation": std_of_relation,
-                        "set_size": relation.size,
-                        "not_nan_size": not_nan_count,
-                        "good_pixel_percent": f"({not_nan_count} / {relation.size}) = {good_percent_count:.3f}"
-                    }
-                    print(calibration_set["mean_of_relation"],
-                          calibration_set["std_of_relation"],
-                          calibration_set["good_pixel_percent"])
-                    calibration_sets.append(calibration_set)
+def get_relation_statistics(combination):
+    tag, iso, f_number, exposure_times_dict, a, b = combination
+    a_data = prepare_data(exposure_times_dict, a)
+    b_data = prepare_data(exposure_times_dict, b)
 
-    time_stamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S_%f")
-    with open(f"all_image_statistic{time_stamp}.pkl", 'wb') as file:
-        pickle.dump(calibration_sets, file)
+    if a_data is None or b_data is None:
+        return None
 
-    return calibration_sets
+    relation = np.abs(a_data / b_data)
+    std_of_relation = np.nanstd(relation, axis=(0, 1))
+    if np.any(std_of_relation > 0.15) or np.any(std_of_relation < 0.001) or np.any(
+            np.isnan(std_of_relation)):
+        return None
+
+    not_nan_count = np.count_nonzero(~np.isnan(relation))
+    good_percent_count = 100 * not_nan_count / relation.size
+    if good_percent_count < 1:
+        return None
+
+    calibration_set = {
+        "tag": tag,
+        "iso": iso,
+        "f_number": f_number,
+        "A_exposure_time": a,
+        "B_exposure_time": b,
+        "mean_of_relation": np.nanmean(relation, axis=(0, 1)),
+        "std_of_relation": std_of_relation,
+        "set_size": relation.size,
+        "not_nan_size": not_nan_count,
+        "good_pixel_percent": f"({not_nan_count} / {relation.size}) = {good_percent_count:.3f}"
+    }
+    print(calibration_set["mean_of_relation"],
+          calibration_set["std_of_relation"],
+          calibration_set["good_pixel_percent"])
+    return calibration_set
+
+
+def get_statistic_data_per_exposure_time(data: dict) -> list:
+    combinations = prepare_combination(data)
+    with ProcessPoolExecutor(max_workers=psutil.cpu_count(logical=False)) as executor:
+        print(f"Start multiprocessing statistic combinations test: Total combinations for execute {len(combinations)}")
+        calibration_sets = list(executor.map(get_relation_statistics, combinations))
+
+    return [calibration_set for calibration_set in calibration_sets if calibration_set is not None]
 
 
 def complete_statistic_data_per_exposure_time(samples):
@@ -167,6 +165,7 @@ def complete_statistic_data_per_f_number(samples):
 
             samples[iso][f_number] = get_weighted_mean_and_std(means, stds, weights)
     return samples
+
 
 def complete_statistic_data_per_iso(samples):
     for iso, f_number_dict in samples.items():
@@ -211,4 +210,3 @@ def get_weighted_mean_and_std(means: list[float], stds: list[float], weights: li
 
     # Return the results in a dictionary
     return {"mean": weighted_mean, "std": weighted_std, "set_size": np.sum(weights_np)}
-
